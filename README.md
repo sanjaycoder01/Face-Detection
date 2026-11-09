@@ -1,30 +1,39 @@
 # Face Detection Service (Phase 1)
 
-Event photo platform **Phase 1**: detect faces in uploaded images with SCRFD (via InsightFace), draw bounding boxes, and return metadata plus an annotated JPEG. No face recognition, embeddings, database, or auth.
+Event photo platform **Phase 1**: detect faces in uploaded images using [CompreFace](https://github.com/exadel-inc/CompreFace), draw bounding boxes, and return metadata plus an annotated JPEG. No face recognition, embeddings, database, or auth in this app (CompreFace runs separately for inference only).
 
 ## Project layout
 
 | Path | Responsibility |
 |------|----------------|
-| `app/main.py` | FastAPI app, startup model load, `/health`, global error handling |
+| `app/main.py` | FastAPI app, CompreFace config at startup, `/health`, global error handling |
 | `app/routes/detection.py` | `POST /api/v1/faces/detect`, `GET /api/v1/faces/model-info` |
-| `app/services/face_detector.py` | InsightFace SCRFD wrapper, singleton load, `detect_faces()` |
+| `app/routes/match.py` | `POST /api/v1/faces/match` (reference photo → find same person in target) |
+| `app/routes/history.py` | `GET /api/v1/faces/history` |
+| `app/routes/media.py` | `GET /api/v1/media/outputs/{filename}` (safe image serving) |
+| `app/services/face_matcher.py` | Temporary CompreFace subject enroll + recognize + cleanup |
+| `app/services/face_detector.py` | CompreFace-backed detector singleton |
+| `app/services/compreface_client.py` | HTTP client for CompreFace detect/recognize |
+| `app/services/history_store.py` | Local JSON history for match operations |
 | `app/schemas/detection_schema.py` | Pydantic response/error models |
 | `app/utils/image_utils.py` | Validate/decode uploads, draw boxes, encode JPEG |
-| `uploads/` | Optional scratch (API does not persist uploads by default) |
-| `outputs/` | Optional local output folder for manual experiments |
-| `tests/` | Pytest + mocked detector |
+| `docker-compose.compreface.yml` | Local CompreFace stack (UI on port **8080**) |
+| `uploads/` | Optional scratch |
+| `outputs/` | Annotated images saved from the API |
+| `data/history.json` | Match history (created on first match; not invented) |
+| `tests/` | Pytest with mocked detector |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Environment variable template |
 
-## Architecture and request flow
+## Architecture
 
 ```mermaid
 flowchart LR
-  Client -->|multipart image| API[FastAPI route]
+  Client -->|multipart image| API[FastAPI :8000]
   API --> Utils[image_utils]
   Utils --> Detector[face_detector]
-  Detector -->|SCRFD| InsightFace[InsightFace CPU]
+  Detector -->|HTTP + x-api-key| CF[CompreFace :8080]
+  CF --> Core[compreface-core ML]
   Detector --> Utils
   Utils -->|annotate + JPEG| API
   API -->|multipart/mixed JSON + image| Client
@@ -32,33 +41,56 @@ flowchart LR
 
 1. Client uploads JPEG/PNG to `POST /api/v1/faces/detect`.
 2. Route validates size/format and decodes with OpenCV.
-3. `FaceDetectorService.detect_faces()` runs SCRFD once per request (model weights stay loaded).
-4. Utils draw green boxes, IDs, and confidence labels.
-5. Response is **multipart/mixed**: part 1 = JSON metadata, part 2 = annotated JPEG.
+3. `FaceDetectorService` encodes the image and calls CompreFace detection API.
+4. CompreFace returns boxes as `x_min`, `y_min`, `x_max`, `y_max`, and `probability`.
+5. This service maps them to your API schema, draws annotations, and returns **multipart/mixed** (JSON + JPEG).
 
-**Why multipart/mixed?** One round trip returns both structured data and the visual result. Swagger still documents the JSON shape; use curl or a small script to split parts and save the image. A separate image-only endpoint can be added in Phase 2 if clients prefer pure JSON.
+Your FastAPI app stays on port **8000**. CompreFace UI/API gateway uses **8080** in the bundled compose file to avoid a port clash.
 
-## SCRFD (high level)
+## CompreFace setup
 
-SCRFD is a single-stage face detector that predicts face boxes (and optional landmarks) at multiple feature scales. It is designed for speed and accuracy on crowded scenes—well suited to group event photos. InsightFace ships SCRFD weights inside model packs such as `buffalo_l`.
+### 1. Start CompreFace (Docker)
 
-## InsightFace model loading
+Requires [Docker](https://docs.docker.com/get-docker/) and Docker Compose.
 
-On startup, the app creates `FaceAnalysis(name="buffalo_l", allowed_modules=["detection"], providers=["CPUExecutionProvider"])`, then calls `prepare(ctx_id=-1, det_size=(640, 640))`. InsightFace downloads ONNX weights into `~/.insightface/models/` on first run. Only the detection graph runs; recognition/ArcFace modules are not loaded.
+```bash
+cd /Users/sanjay/Documents/Face_Dectection
+docker compose -f docker-compose.compreface.yml up -d
+```
 
-**Licensing:** Review [InsightFace](https://github.com/deepinsight/insightface) and the buffalo model license before commercial deployment.
+Wait until containers are healthy (first pull can take several minutes). Open [http://localhost:8080](http://localhost:8080).
 
-## Setup
+### 2. Create a Face Detection service and API key
+
+1. Sign up / log in in the CompreFace UI.
+2. Create an application (if prompted).
+3. Add a **Face detection** service (not recognition).
+4. Copy the service **API key**.
+
+CompreFace documents the detection endpoint as:
+
+`POST /api/v1/detection/detect` with header `x-api-key` and multipart field `file`.
+
+See [Rest API description](https://github.com/exadel-inc/CompreFace/blob/master/docs/Rest-API-description.md#face-detection-service).
+
+### 3. Configure this app
+
+```bash
+cp .env.example .env
+# Set COMPREFACE_API_KEY=your-key-here
+```
+
+## Python setup
 
 ```bash
 cd /Users/sanjay/Documents/Face_Dectection
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # optional
+cp .env.example .env   # set COMPREFACE_API_KEY and COMPREFACE_SERVICE_TYPE
 ```
 
-First startup downloads models (network required, may take a few minutes).
+The app loads `.env` automatically on startup (`python-dotenv`).
 
 ## Run the server
 
@@ -71,19 +103,94 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - Health: `GET /health`
 - Model info: `GET /api/v1/faces/model-info`
 
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CORS_ALLOWED_ORIGINS` | localhost + Lovable preview URL | Comma-separated browser origins |
+| `COMPREFACE_URL` | `http://localhost:8080` | CompreFace UI/gateway base URL |
+| `COMPREFACE_API_KEY` | (required) | API key from the CompreFace service (Dashboard) |
+| `COMPREFACE_SERVICE_TYPE` | `detection` | `detection` or `recognition` (`recognition` required for match) |
+| `COMPREFACE_DET_PROB_THRESHOLD` | (optional) | Min face confidence 0.0–1.0 |
+| `COMPREFACE_FACE_LIMIT` | `0` | Max faces (0 = no limit) |
+| `COMPREFACE_MAX_DETECT_SIZE` | `640` | Shown in model-info; core uses `IMG_LENGTH_LIMIT` in compose |
+| `COMPREFACE_TIMEOUT_SECONDS` | `60` | HTTP timeout to CompreFace |
+| `MAX_UPLOAD_BYTES` | `10485760` | Max upload size for this API |
+| `OUTPUT_DIR` | `outputs` | Annotated image directory |
+| `HISTORY_FILE` | `data/history.json` | Match history JSON |
+
+CompreFace itself limits uploads (default **5 MB** per image in their stack).
+
+## Frontend / Lovable integration
+
+- Frontend must call **this FastAPI app only** (never CompreFace directly).
+- Set frontend `VITE_API_BASE_URL=http://127.0.0.1:8000` for local development.
+- Hosted Lovable preview **cannot** reach your Mac `localhost`. CORS fixes browser policy only. Use a tunnel (ngrok/cloudflared) or a deployed HTTPS API URL for hosted preview.
+- Configure `CORS_ALLOWED_ORIGINS` with your Lovable preview origin.
+
+### Response contract change (detect + match)
+
+**Default is now `application/json`** so the React app can use `response.json()`.
+
+| Field | Meaning |
+|-------|---------|
+| `matches` / `faces` | Results with bounding boxes and scores |
+| `annotated_image_url` | Relative URL, e.g. `/api/v1/media/outputs/Fullimage_matched_abcd1234.jpg` |
+| `operation_id` | History id (match only) |
+| `person_name` | Optional name from form field `name` (match only) |
+
+Display images as: `` `${VITE_API_BASE_URL}${annotated_image_url}` ``
+
+Legacy **multipart/mixed** (JSON part + JPEG bytes) is still available:
+
+`?response_format=multipart`
+
+## Face matching (reference → event photo)
+
+Requires **`COMPREFACE_SERVICE_TYPE=recognition`** and a Face **Recognition** service API key.
+
+1. Upload a **reference** image (one person — a selfie or a crop from the event photo).
+2. Upload the **target** group/event image.
+3. Optional form field **`name`** (person name for history).
+4. The API enrolls the reference face temporarily in CompreFace, runs recognition on the target, returns matches with **similarity** scores, saves an annotated JPEG, and appends a history record.
+
+If the reference contains multiple faces, the **largest face** is used automatically.
+
+**Swagger:** `POST /api/v1/faces/match` — fields `reference`, `target`, optional `name`.
+
+**curl (JSON, frontend-friendly):**
+
+```bash
+curl -s \
+  -F "reference=@/path/to/person.jpg" \
+  -F "target=@/path/to/event_group.jpg" \
+  -F "name=Alex" \
+  http://127.0.0.1:8000/api/v1/faces/match
+```
+
+Defaults: **`COMPREFACE_MATCH_SIMILARITY_THRESHOLD=0.75`** and **`COMPREFACE_MATCH_MAX_RESULTS=1`**. Optional query: `?max_matches=3`.
+
+## History and media
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/faces/history
+curl -s -o /tmp/annotated.jpg http://127.0.0.1:8000/api/v1/media/outputs/FILENAME.jpg
+curl -s http://127.0.0.1:8000/health
+```
+
+History starts empty and only grows when match operations succeed. Existing `outputs/*.jpg` files are not turned into fake history rows.
+
 ## API examples
 
 **Detect faces (curl):**
 
 ```bash
-curl -s -D /tmp/headers.txt -o /tmp/body.bin \
+curl -s \
   -F "image=@/path/to/group_photo.jpg" \
   http://127.0.0.1:8000/api/v1/faces/detect
 ```
 
-Inspect headers for `Content-Type: multipart/mixed; boundary=...`, then split parts with the boundary string to extract JSON and JPEG.
-
-**Example JSON metadata:**
+**Example detect JSON:**
 
 ```json
 {
@@ -92,22 +199,16 @@ Inspect headers for `Content-Type: multipart/mixed; boundary=...`, then split pa
   "faces": [
     {
       "face_id": 1,
-      "bounding_box": { "x1": 100, "y1": 80, "x2": 200, "y2": 220 },
-      "confidence": 0.98
+      "bounding_box": { "x1": 68, "y1": 77, "x2": 376, "y2": 479 },
+      "confidence": 0.9988
     }
   ],
-  "message": "Face detection completed"
+  "message": "Face detection completed",
+  "annotated_image_url": "/api/v1/media/outputs/group_detected_abcd1234.jpg"
 }
 ```
 
-**Bounding boxes:** Coordinates are in **pixel space** of the decoded image: `(x1, y1)` top-left, `(x2, y2)` bottom-right, origin at the top-left corner. `face_id` is assigned left-to-right in detector output order (1-based).
-
-## Manual test with a real group photo
-
-1. Start the server (see above).
-2. Open `/docs` → **POST /api/v1/faces/detect** → Try it out → choose a group JPEG/PNG (≤ 10 MB).
-3. Execute; download the response body and parse multipart, or use curl as above and save the JPEG part to `outputs/annotated.jpg`.
-4. Confirm `total_faces` matches visible people and boxes align with faces.
+Bounding boxes use pixel coordinates: `(x1, y1)` top-left, `(x2, y2)` bottom-right. `face_id` is assigned left-to-right by `x_min`.
 
 ## Tests
 
@@ -116,18 +217,18 @@ source .venv/bin/activate
 pytest -q
 ```
 
-Unit tests mock the detector so CI does not need model weights.
+Tests mock the detector so CI does not need Docker or CompreFace.
 
 ## Common issues
 
 | Symptom | Likely cause |
 |---------|----------------|
-| `503` model not loaded | First download failed or offline; check logs and `~/.insightface/models/` |
-| Slow first request | One-time ONNX/model init; subsequent requests reuse loaded weights |
-| `413` | File larger than `MAX_UPLOAD_BYTES` (default 10 MB) |
-| `415` | Not JPEG/PNG or wrong extension |
-| Import errors for `onnxruntime` | Reinstall deps inside the venv; use Python 3.11+ |
+| `503` model not loaded | Missing `COMPREFACE_API_KEY` in `.env` |
+| `503` / invalid API key | Wrong key or recognition key used instead of detection |
+| Connection errors | CompreFace not running; run `docker compose -f docker-compose.compreface.yml ps` |
+| CompreFace `413` / size errors | Image over CompreFace limit (~5 MB); resize or raise limits in their compose |
+| Port conflict on 8080 | Change CompreFace mapping in `docker-compose.compreface.yml` and set `COMPREFACE_URL` |
 
-## Request lifecycle (summary)
+## Licensing
 
-Upload → validate filename/size → decode BGR → SCRFD inference → build face list → draw annotations → encode JPEG → return multipart/mixed (JSON + image). Images with zero faces still return **HTTP 200** with `total_faces: 0`.
+CompreFace is open source (Apache 2.0). Review [CompreFace](https://github.com/exadel-inc/CompreFace) and embedded model licenses before commercial use.

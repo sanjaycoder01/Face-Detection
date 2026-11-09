@@ -21,9 +21,13 @@ class FaceDetectionResponse(BaseModel):
     total_faces: int
     faces: list[DetectedFace]
     message: str = "Face detection completed"
+    annotated_image_url: str | None = Field(
+        None,
+        description="URL path for the annotated JPEG (prefix with API base URL)",
+    )
     output_image_path: str | None = Field(
         None,
-        description="Absolute path to the annotated JPEG saved under outputs/",
+        description="Server filesystem path (local tooling only; prefer annotated_image_url)",
     )
 
 

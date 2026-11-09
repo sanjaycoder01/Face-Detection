@@ -6,9 +6,10 @@ import json
 import logging
 import os
 import uuid
+from typing import Literal
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
-from fastapi.responses import Response
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import JSONResponse, Response
 
 from app.schemas.detection_schema import (
     ErrorResponse,
@@ -17,6 +18,7 @@ from app.schemas.detection_schema import (
 )
 from app.services.face_detector import get_detector
 from app.utils import image_utils
+from app.utils.media_urls import media_url_for_filename
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,8 @@ def _multipart_mixed_response(json_payload: dict, jpeg_bytes: bytes) -> Response
     """
     multipart/mixed: JSON metadata + annotated JPEG.
 
-    Swagger documents the JSON shape; curl or client code can split on the boundary
-    to save the processed image.
+    Swagger documents the JSON shape; clients that need the binary can opt into
+    response_format=multipart. Default API responses are application/json.
     """
     boundary = f"face-detection-{uuid.uuid4().hex}"
     json_bytes = json.dumps(json_payload).encode("utf-8")
@@ -73,14 +75,14 @@ def model_info() -> ModelInfoResponse:
     responses={
         200: {
             "description": (
-                "multipart/mixed: JSON metadata (metadata) + annotated JPEG (processed_image). "
-                "Use curl -D - to inspect parts, or parse boundary in your client."
+                "Default: application/json with faces and annotated_image_url. "
+                "Pass response_format=multipart for legacy multipart/mixed."
             ),
             "content": {
-                "multipart/mixed": {},
                 "application/json": {
                     "schema": FaceDetectionResponse.model_json_schema(),
                 },
+                "multipart/mixed": {},
             },
         },
         400: {"model": ErrorResponse},
@@ -90,7 +92,13 @@ def model_info() -> ModelInfoResponse:
     },
     summary="Detect faces in an uploaded image",
 )
-async def detect_faces(image: UploadFile = File(..., description="JPEG or PNG image")):
+async def detect_faces(
+    image: UploadFile = File(..., description="JPEG or PNG image"),
+    response_format: Literal["json", "multipart"] = Query(
+        "json",
+        description="json (default) or multipart (legacy)",
+    ),
+):
     detector = get_detector()
     if not detector.is_ready:
         raise HTTPException(
@@ -146,12 +154,16 @@ async def detect_faces(image: UploadFile = File(..., description="JPEG or PNG im
     annotated = image_utils.draw_face_annotations(bgr, faces)
     jpeg_bytes = image_utils.encode_jpeg(annotated)
     saved_path = image_utils.save_processed_jpeg(jpeg_bytes, image.filename)
+    annotated_image_url = media_url_for_filename(saved_path.name)
 
     payload = FaceDetectionResponse(
         success=True,
         total_faces=len(faces),
         faces=faces,
         message="Face detection completed",
+        annotated_image_url=annotated_image_url,
         output_image_path=str(saved_path),
     )
-    return _multipart_mixed_response(payload.model_dump(), jpeg_bytes)
+    if response_format == "multipart":
+        return _multipart_mixed_response(payload.model_dump(), jpeg_bytes)
+    return JSONResponse(content=payload.model_dump(), status_code=status.HTTP_200_OK)

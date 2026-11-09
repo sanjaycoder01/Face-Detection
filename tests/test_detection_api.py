@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import re
 
-import pytest
-
 from app.schemas.detection_schema import BoundingBox, DetectedFace
 from tests.conftest import make_blank_jpeg, make_blank_png
 
@@ -26,15 +24,19 @@ def _parse_multipart_json(content: bytes, content_type: str) -> dict:
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["model_loaded"] is True
+    data = response.json()
+    assert data["model_loaded"] is True
+    assert data["service"] == "face-recognition-api"
+    assert data["api"] == "running"
+    assert "compreface" in data
 
 
 def test_model_info(client, mock_detector):
     response = client.get("/api/v1/faces/model-info")
     assert response.status_code == 200
     data = response.json()
-    assert data["model_pack"] == "buffalo_l"
-    assert "SCRFD" in data["detection_model"]
+    assert data["model_pack"] == "CompreFace"
+    assert "CompreFace" in data["detection_model"]
 
 
 def test_detect_valid_image_with_faces(client, mock_detector):
@@ -50,10 +52,24 @@ def test_detect_valid_image_with_faces(client, mock_detector):
         files={"image": ("group.jpg", make_blank_jpeg(), "image/jpeg")},
     )
     assert response.status_code == 200
-    meta = _parse_multipart_json(response.content, response.headers["content-type"])
+    assert "application/json" in response.headers["content-type"]
+    meta = response.json()
     assert meta["success"] is True
     assert meta["total_faces"] == 1
     assert meta["faces"][0]["face_id"] == 1
+    assert meta["annotated_image_url"].startswith("/api/v1/media/outputs/")
+
+
+def test_detect_multipart_legacy(client, mock_detector):
+    mock_detector.detect_faces.return_value = []
+    response = client.post(
+        "/api/v1/faces/detect?response_format=multipart",
+        files={"image": ("group.jpg", make_blank_jpeg(), "image/jpeg")},
+    )
+    assert response.status_code == 200
+    assert "multipart/mixed" in response.headers["content-type"]
+    meta = _parse_multipart_json(response.content, response.headers["content-type"])
+    assert meta["total_faces"] == 0
 
 
 def test_detect_no_faces(client, mock_detector):
@@ -63,7 +79,7 @@ def test_detect_no_faces(client, mock_detector):
         files={"image": ("empty_scene.jpg", make_blank_jpeg(), "image/jpeg")},
     )
     assert response.status_code == 200
-    meta = _parse_multipart_json(response.content, response.headers["content-type"])
+    meta = response.json()
     assert meta["total_faces"] == 0
     assert meta["faces"] == []
 

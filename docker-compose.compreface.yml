@@ -1,0 +1,86 @@
+# CompreFace stack for local face detection.
+# UI + API gateway: http://localhost:8080
+# Create a "Face detection" service in the UI and copy its API key into .env (COMPREFACE_API_KEY).
+#
+# Start: docker compose -f docker-compose.compreface.yml up -d
+# Docs: https://github.com/exadel-inc/CompreFace
+
+services:
+  compreface-postgres-db:
+    image: exadel/compreface-postgres-db:1.2.0
+    restart: always
+    container_name: compreface-postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: frs
+    volumes:
+      - compreface-postgres-data:/var/lib/postgresql/data
+
+  compreface-api:
+    image: exadel/compreface-api:1.2.0
+    restart: always
+    container_name: compreface-api
+    depends_on:
+      - compreface-postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_URL: jdbc:postgresql://compreface-postgres-db:5432/frs
+      SPRING_PROFILES_ACTIVE: dev
+      API_JAVA_OPTS: -Xmx4g
+      SAVE_IMAGES_TO_DB: "true"
+      MAX_FILE_SIZE: 5MB
+      MAX_REQUEST_SIZE: 10MB
+      CONNECTION_TIMEOUT: "10000"
+      READ_TIMEOUT: "60000"
+
+  compreface-admin:
+    image: exadel/compreface-admin:1.2.0
+    restart: always
+    container_name: compreface-admin
+    depends_on:
+      - compreface-postgres-db
+      - compreface-api
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_URL: jdbc:postgresql://compreface-postgres-db:5432/frs
+      SPRING_PROFILES_ACTIVE: dev
+      ENABLE_EMAIL_SERVER: "false"
+      ADMIN_JAVA_OPTS: -Xmx1g
+      MAX_FILE_SIZE: 5MB
+      MAX_REQUEST_SIZE: 10MB
+
+  compreface-fe:
+    image: exadel/compreface-fe:1.2.0
+    restart: always
+    container_name: compreface-ui
+    ports:
+      - "8080:80"
+    depends_on:
+      - compreface-api
+      - compreface-admin
+    environment:
+      CLIENT_MAX_BODY_SIZE: 10M
+      PROXY_READ_TIMEOUT: 60000ms
+      PROXY_CONNECT_TIMEOUT: 10000ms
+
+  compreface-core:
+    image: exadel/compreface-core:1.2.0
+    restart: always
+    container_name: compreface-core
+    environment:
+      ML_PORT: "3000"
+      IMG_LENGTH_LIMIT: "640"
+      UWSGI_PROCESSES: "2"
+      UWSGI_THREADS: "1"
+    healthcheck:
+      test: curl --fail http://localhost:3000/healthcheck || exit 1
+      interval: 10s
+      retries: 3
+      start_period: 30s
+      timeout: 5s
+
+volumes:
+  compreface-postgres-data:
