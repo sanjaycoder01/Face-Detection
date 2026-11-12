@@ -89,6 +89,23 @@ def test_match_success(client, mock_detector, mock_matcher, tmp_path, monkeypatc
     assert media.headers["content-type"].startswith("image/")
 
 
+def test_match_accepts_lovable_aliases(client, mock_detector, mock_matcher, tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv("HISTORY_FILE", str(tmp_path / "history.json"))
+    response = client.post(
+        "/api/v1/faces/match",
+        data={"name": "Sanjay"},
+        files={
+            "reference_image": ("ref.jpg", make_blank_jpeg(), "image/jpeg"),
+            "group_image": ("group.jpg", make_blank_jpeg(), "image/jpeg"),
+        },
+    )
+    assert response.status_code == 200
+    meta = response.json()
+    assert meta["person_name"] == "Sanjay"
+    assert meta["match_count"] == 1
+
+
 def test_match_multipart_legacy(client, mock_detector, mock_matcher, tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "outputs"))
     monkeypatch.setenv("HISTORY_FILE", str(tmp_path / "history.json"))

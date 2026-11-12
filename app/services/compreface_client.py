@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,60 @@ logger = logging.getLogger(__name__)
 
 
 ServiceType = str  # "detection" | "recognition"
+
+
+def _log_embeddings_enabled() -> bool:
+    return os.getenv("LOG_FACE_EMBEDDINGS", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def log_face_embeddings(payload: dict[str, Any], *, source: str) -> None:
+    """Print embedding vectors returned by CompreFace calculator plugin."""
+    if not _log_embeddings_enabled():
+        return
+
+    results = payload.get("result") or []
+    if not results:
+        logger.info("[%s] No faces/embeddings in CompreFace response", source)
+        return
+
+    for index, item in enumerate(results, start=1):
+        box = item.get("box") or {}
+        embedding = item.get("embedding")
+        if embedding is None:
+            logger.info(
+                "[%s] face #%s box=(%s,%s)-(%s,%s) — no embedding "
+                "(enable face_plugins=calculator)",
+                source,
+                index,
+                box.get("x_min"),
+                box.get("y_min"),
+                box.get("x_max"),
+                box.get("y_max"),
+            )
+            continue
+
+        values = [float(v) for v in embedding]
+        logger.info(
+            "[%s] face #%s box=(%s,%s)-(%s,%s) embedding_dim=%s",
+            source,
+            index,
+            box.get("x_min"),
+            box.get("y_min"),
+            box.get("x_max"),
+            box.get("y_max"),
+            len(values),
+        )
+        # Full vector — visible in uvicorn console
+        print(
+            f"[embedding] {source} face #{index} "
+            f"dim={len(values)} values={values}",
+            flush=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -94,17 +149,22 @@ class CompreFaceClient:
         except httpx.HTTPError:
             return False
 
-    def detect_faces(
+    def detect_faces_payload(
         self,
         image_bytes: bytes,
         *,
         filename: str = "image.jpg",
         content_type: str = "image/jpeg",
-    ) -> list[DetectedFace]:
+        log_source: str = "detect",
+    ) -> dict[str, Any]:
+        """Detect faces and return raw CompreFace JSON (includes embeddings)."""
         if not self._config.api_key:
             raise CompreFaceError("COMPREFACE_API_KEY is not configured")
 
-        params: dict[str, str | int | float] = {}
+        params: dict[str, str | int | float] = {
+            # calculator → embedding vector per face
+            "face_plugins": "calculator",
+        }
         if self._config.limit:
             params["limit"] = self._config.limit
         if self._config.det_prob_threshold is not None:
@@ -137,6 +197,22 @@ class CompreFaceClient:
         except ValueError as exc:
             raise CompreFaceError("CompreFace returned non-JSON response") from exc
 
+        log_face_embeddings(payload, source=log_source)
+        return payload
+
+    def detect_faces(
+        self,
+        image_bytes: bytes,
+        *,
+        filename: str = "image.jpg",
+        content_type: str = "image/jpeg",
+    ) -> list[DetectedFace]:
+        payload = self.detect_faces_payload(
+            image_bytes,
+            filename=filename,
+            content_type=content_type,
+            log_source="detect",
+        )
         faces = _parse_detection_response(payload)
         logger.info("CompreFace detected %s face(s)", len(faces))
         return faces
@@ -226,7 +302,11 @@ class CompreFaceClient:
                 "Face matching requires COMPREFACE_SERVICE_TYPE=recognition"
             )
 
-        params: dict[str, str | int | float] = {"prediction_count": prediction_count}
+        params: dict[str, str | int | float] = {
+            "prediction_count": prediction_count,
+            # calculator → embedding vector per face
+            "face_plugins": "calculator",
+        }
         if self._config.limit:
             params["limit"] = self._config.limit
         if self._config.det_prob_threshold is not None:
@@ -254,6 +334,9 @@ class CompreFaceClient:
             )
 
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
             raise CompreFaceError("CompreFace returned non-JSON response") from exc
+
+        log_face_embeddings(payload, source="recognize")
+        return payload

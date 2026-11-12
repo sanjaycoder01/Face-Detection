@@ -12,6 +12,7 @@ import numpy as np
 from app.schemas.detection_schema import BoundingBox, DetectedFace
 from app.schemas.match_schema import MatchedFace
 from app.services.compreface_client import CompreFaceClient, CompreFaceConfig, CompreFaceError
+from app.services.embedding_store import save_embeddings_file
 from app.services.face_detector import DetectorConfig
 
 logger = logging.getLogger(__name__)
@@ -103,19 +104,42 @@ class FaceMatcherService:
 
         ref_for_enroll = _reference_single_face_crop(reference_bgr, self._client)
         ref_bytes = _encode_jpeg_bytes(ref_for_enroll)
+        # Original reference image bytes (for target-photo embeddings file)
+        reference_full_bytes = _encode_jpeg_bytes(reference_bgr)
         target_bytes = _encode_jpeg_bytes(target_bgr)
         subject = f"match-{uuid.uuid4().hex}"
 
         try:
+            # Target/person photo embeddings → outputs/embeddings/target_photo_embeddings.json
+            try:
+                target_payload = self._client.detect_faces_payload(
+                    reference_full_bytes,
+                    filename=reference_filename,
+                    log_source="target_photo",
+                )
+                save_embeddings_file(
+                    kind="target",
+                    source_filename=reference_filename,
+                    payload=target_payload,
+                )
+            except CompreFaceError as emb_exc:
+                logger.warning("Could not save target photo embeddings: %s", emb_exc)
+
             self._client.add_subject_example(
                 subject,
                 ref_bytes,
                 filename=reference_filename,
             )
+            # Group photo embeddings come from recognize (face_plugins=calculator)
             payload = self._client.recognize(
                 target_bytes,
                 filename=target_filename,
                 prediction_count=5,
+            )
+            save_embeddings_file(
+                kind="group",
+                source_filename=target_filename,
+                payload=payload,
             )
         except CompreFaceError as exc:
             raise RuntimeError(str(exc)) from exc

@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.routes.detection import MAX_UPLOAD_BYTES, _multipart_mixed_response
 from app.schemas.match_schema import FaceMatchResponse
@@ -19,10 +20,43 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/faces", tags=["faces"])
 
+# Canonical + Lovable-friendly aliases
+REFERENCE_FIELD_NAMES = (
+    "reference",
+    "reference_image",
+    "referenceImage",
+    "selfie",
+    "person",
+    "person_image",
+    "personImage",
+    "face",
+    "query",
+)
+TARGET_FIELD_NAMES = (
+    "target",
+    "group",
+    "group_image",
+    "groupImage",
+    "group_photo",
+    "groupPhoto",
+    "event",
+    "event_photo",
+    "eventPhoto",
+    "photo",
+)
+NAME_FIELD_NAMES = (
+    "name",
+    "person_name",
+    "personName",
+    "target_name",
+    "targetName",
+)
 
-async def _read_upload(upload: UploadFile) -> tuple[bytes, str]:
+
+async def _read_upload(upload: UploadFile | StarletteUploadFile) -> tuple[bytes, str]:
+    filename = getattr(upload, "filename", None)
     try:
-        image_utils.validate_upload_filename(upload.filename)
+        image_utils.validate_upload_filename(filename)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -40,7 +74,26 @@ async def _read_upload(upload: UploadFile) -> tuple[bytes, str]:
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"Image exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
         )
-    return raw, upload.filename or "image.jpg"
+    return raw, filename or "image.jpg"
+
+
+def _first_upload(form, field_names: tuple[str, ...]) -> UploadFile | StarletteUploadFile | None:
+    for key in field_names:
+        value = form.get(key)
+        if isinstance(value, (UploadFile, StarletteUploadFile)):
+            return value
+    return None
+
+
+def _first_text(form, field_names: tuple[str, ...]) -> str | None:
+    for key in field_names:
+        value = form.get(key)
+        if value is None or isinstance(value, (UploadFile, StarletteUploadFile)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 @router.post(
@@ -59,23 +112,13 @@ async def _read_upload(upload: UploadFile) -> tuple[bytes, str]:
         400: {"description": "Invalid image"},
         413: {"description": "Payload too large"},
         415: {"description": "Unsupported media type"},
+        422: {"description": "Missing required form fields"},
         503: {"description": "Matcher unavailable"},
     },
     summary="Match a reference face photo against faces in a target image",
 )
 async def match_faces(
-    reference: UploadFile = File(
-        ...,
-        description="Photo of one person (clear face; can be a crop from the event photo)",
-    ),
-    target: UploadFile = File(
-        ...,
-        description="Event or group photo to search in",
-    ),
-    name: str | None = Form(
-        None,
-        description="Optional person name from the frontend (stored in history)",
-    ),
+    request: Request,
     max_matches: int | None = Query(
         None,
         ge=0,
@@ -90,6 +133,13 @@ async def match_faces(
         description="json (default, frontend-friendly) or multipart (legacy curl/Swagger binary)",
     ),
 ):
+    """
+    Multipart form fields:
+
+    - reference image: `reference` (preferred) or aliases `selfie`, `person`, `personImage`, ...
+    - group image: `target` (preferred) or aliases `group`, `groupPhoto`, `eventPhoto`, ...
+    - person name: `name` (preferred) or aliases `person_name`, `personName`, `target_name`, ...
+    """
     matcher = get_matcher()
     if not matcher.is_ready:
         raise HTTPException(
@@ -98,6 +148,22 @@ async def match_faces(
                 "Face matching requires COMPREFACE_SERVICE_TYPE=recognition "
                 "and a valid COMPREFACE_API_KEY"
             ),
+        )
+
+    form = await request.form()
+    reference = _first_upload(form, REFERENCE_FIELD_NAMES)
+    target = _first_upload(form, TARGET_FIELD_NAMES)
+    person_name_raw = _first_text(form, NAME_FIELD_NAMES)
+
+    missing: list[str] = []
+    if reference is None:
+        missing.append("reference (or selfie/person/personImage)")
+    if target is None:
+        missing.append("target (or group/groupPhoto/eventPhoto)")
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Field required: {'; '.join(missing)}",
         )
 
     ref_raw, ref_name = await _read_upload(reference)
@@ -147,19 +213,21 @@ async def match_faces(
         suffix="_matched",
     )
     annotated_image_url = media_url_for_filename(saved_path.name)
-    person_name = name.strip() if name and name.strip() else None
+    person_name = person_name_raw
 
     if result.matches:
         best = result.matches[0]
         pct = int(round(best.similarity * 100))
-        message = f"Best match: {pct}% similar (face #{best.face_id})"
+        who = f" for {person_name}" if person_name else ""
+        message = f"Best match{who}: {pct}% similar (face #{best.face_id})"
         if result.candidates_above_threshold > len(result.matches):
             message += (
                 f"; {result.candidates_above_threshold} face(s) above threshold, "
                 f"showing top {len(result.matches)}"
             )
     else:
-        message = "No matching faces found in target image"
+        who = f" for {person_name}" if person_name else ""
+        message = f"No matching faces found in target image{who}"
 
     history = append_match_history(
         person_name=person_name,

@@ -52,6 +52,7 @@ def _cors_origins() -> list[str]:
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
                 "https://id-preview--aec36bb1-da36-4b41-9f17-df680b48ef48.lovable.app",
+                "https://image-locked-recreation.lovable.app",
             ]
         ),
     )

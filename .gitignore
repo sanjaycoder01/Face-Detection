@@ -10,6 +10,8 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
+outputs/embeddings/*
+!outputs/embeddings/.gitkeep
 data/*
 !data/.gitkeep
 .pytest_cache/
