@@ -1,6 +1,8 @@
 # Face Detection Service (Phase 1)
 
-Event photo platform **Phase 1**: detect faces in uploaded images using [CompreFace](https://github.com/exadel-inc/CompreFace), draw bounding boxes, and return metadata plus an annotated JPEG. No face recognition, embeddings, database, or auth in this app (CompreFace runs separately for inference only).
+Event photo platform **Phase 1**: detect faces in uploaded images using [CompreFace](https://github.com/exadel-inc/CompreFace), draw bounding boxes, and return metadata plus an annotated JPEG. Face matching, history, media URLs, and embedding dumps are also implemented. CompreFace runs separately for inference; this FastAPI app is the only API the frontend should call.
+
+**Full technical documentation for developers:** [`docs/TECHNICAL.md`](docs/TECHNICAL.md)
 
 ## Project layout
 
